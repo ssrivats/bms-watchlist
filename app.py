@@ -445,6 +445,11 @@ def _send_watchlist_alert(watch_id, movie_title, phone, found_seats):
 
 # ── API Routes ────────────────────────────────────────────────────────────────
 
+@app.route("/")
+def home():
+    return "BMS Watchlist running", 200
+
+
 @app.route("/health")
 def health():
     try:
