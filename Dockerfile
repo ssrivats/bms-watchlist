@@ -50,14 +50,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium only)
-# All system deps already installed above, so skip install-deps
-RUN playwright install chromium
+# Install Playwright + all browser deps in one shot
+RUN playwright install --with-deps chromium
 
 COPY . .
 
 # Expose port
 EXPOSE 5000
 
-# Use gunicorn in production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "4", "--timeout", "120", "app:app"]
+# Shell form so $PORT is expanded by Railway at runtime
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
