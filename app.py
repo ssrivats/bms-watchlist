@@ -447,16 +447,27 @@ def _send_watchlist_alert(watch_id, movie_title, phone, found_seats):
 
 @app.route("/health")
 def health():
-    all_items = _load_all()
-    monitoring = sum(1 for i in all_items.values() if i.get("status") == "monitoring")
-    return jsonify({
-        "status": "ok",
-        "watching": monitoring,
-        "total": len(all_items),
-        "redis": bool(_redis),
-        "twilio": bool(TWILIO_SID and TWILIO_TOKEN),
-        "time": datetime.now().isoformat(),
-    })
+    try:
+        # Quick health check — don't load all items (slow with Redis)
+        status = {
+            "status": "ok",
+            "service": "bms-watchlist",
+            "redis": bool(_redis),
+            "twilio": bool(TWILIO_SID and TWILIO_TOKEN),
+            "time": datetime.now().isoformat(),
+        }
+
+        # Try to ping Redis if available
+        if _redis:
+            try:
+                _redis.ping()
+                status["redis_connected"] = True
+            except:
+                status["redis_connected"] = False
+
+        return jsonify(status), 200
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 @app.route("/api/watch", methods=["POST"])

@@ -4,6 +4,7 @@ dockerfilePath = "Dockerfile"
 [deploy]
 startCommand = "gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 app:app"
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 10
+healthcheckInterval = 5
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
