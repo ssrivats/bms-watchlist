@@ -83,6 +83,7 @@ BMS_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+TARGET_CATEGORIES = ["elite"]
 
 
 
@@ -240,6 +241,18 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
         f"{theater['slug']}/buytickets/{venue_code}/{date}"
     )
     try:
+        def handle_response(response):
+            try:
+                if "seat" in response.url or "layout" in response.url:
+                    data = response.json()
+                    print("🔥 API:", response.url)
+                    print(data)
+            except Exception:
+                pass
+
+        if not getattr(page, "_bms_response_hook_added", False):
+            page.on("response", handle_response)
+            page._bms_response_hook_added = True
         page.goto(url, timeout=25_000, wait_until="domcontentloaded")
         page.wait_for_timeout(2500)  # wait for React hydration
         result = page.evaluate(_CHECK_JS, event_code)
@@ -276,7 +289,11 @@ def _run_watchlist_monitor(watch_id):
 
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
 
         context = browser.new_context(
@@ -339,17 +356,34 @@ def _run_watchlist_monitor(watch_id):
                         if interval:
                             next_intervals.append(interval)
 
-                        if show.get("hasBackSeats"):
-                            seat = show.get("cheapestSeat", {})
-                            found_seats.append({
-                                "theater": THEATERS[venue_code]["name"],
-                                "venue_code": venue_code,
-                                "date_label": date_label,
-                                "time": show["time"],
-                                "seat_name": seat.get("name", "Back seats"),
-                                "seat_price": seat.get("price", 0),
-                                "booking_url": show.get("bookingUrl", ""),
-                            })
+                        available = show.get("availableCats", [])
+                        if not available:
+                            continue
+
+                        matching = available
+                        if TARGET_CATEGORIES:
+                            matching = [
+                                category for category in available
+                                if any(
+                                    target.lower() in (category.get("name") or "").lower()
+                                    for target in TARGET_CATEGORIES
+                                )
+                            ]
+
+                        if not matching:
+                            continue
+
+                        seat = matching[0]
+
+                        found_seats.append({
+                            "theater": THEATERS[venue_code]["name"],
+                            "venue_code": venue_code,
+                            "date_label": date_label,
+                            "time": show["time"],
+                            "seat_name": seat.get("name", "Available category"),
+                            "seat_price": seat.get("price", 0),
+                            "booking_url": show.get("bookingUrl", ""),
+                        })
 
             if found_seats:
                 item = _load(watch_id)
