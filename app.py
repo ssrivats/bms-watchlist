@@ -172,71 +172,53 @@ def _smart_interval(minutes_away):
 
 # ── Core check: one theater, one date ────────────────────────────────────────
 
-_CHECK_JS = """
-(eventCode) => {
-    try {
-        const api = window.__INITIAL_STATE__?.venueShowtimesFunctionalApi;
-        const queries = api?.queries || {};
-        let transformed = null;
-        for (const q of Object.values(queries)) {
-            if (q?.data?.showDetailsTransformed) {
-                transformed = q.data.showDetailsTransformed;
-                break;
-            }
-        }
-        const EventMap = transformed?.Event;
-        if (!transformed) return { found: false, reason: 'no_transformed_data' };
-        if (!EventMap) return { found: false, reason: 'no_state' };
+def _parse_seat_layout_api(data, event_code, venue_code, date):
+    """Normalize the fullSeatLayout response into the monitor's show format."""
+    try:
+        sessions = (
+            data.get("data", {}).get("sessions")
+            or data.get("sessions")
+            or []
+        )
 
-        const venueCode = window.location.pathname.match(/buytickets\\/([^\\/]+)\\//)?.[1] || '';
-        const date = window.location.pathname.match(/\\/(\\d{8})(?:$|\\/)/)?.[1] || '';
-        const city = window.location.pathname.match(/\\/cinemas\\/([^\\/]+)\\//)?.[1] || 'chennai';
+        shows = []
 
-        const shows = [];
+        for session in sessions:
+            show_time = session.get("showTime") or session.get("time")
+            areas = session.get("areas") or session.get("categories") or []
 
-        for (const movie of Object.values(EventMap)) {
-            for (const child of Object.values(movie.ChildEvents || {})) {
-                if (child.EventCode !== eventCode) continue;
-                for (const session of (child.ShowTimes || [])) {
-                    const cats = session.Categories || [];
+            available = []
+            for area in areas:
+                availability = str(
+                    area.get("availability") or area.get("availStatus") or ""
+                )
 
-                    // Find cheapest category (back seats)
-                    const backKw = /budget|back|economy|classic|standard|bronze|silver/i;
-                    let cheapest = cats.find(c => backKw.test(c.PriceDesc || ''));
-                    if (!cheapest) {
-                        cheapest = cats.reduce((min, c) =>
-                            parseFloat(c.CurPrice || '9999') < parseFloat(min?.CurPrice || '9999') ? c : min,
-                        null);
-                    }
+                if availability not in ("AVAILABLE", "1"):
+                    continue
 
-                    const availableCats = cats
-                        .filter(c => String(c.AvailStatus) === '1')
-                        .map(c => ({ name: c.PriceDesc, price: parseFloat(c.CurPrice || '0') }))
-                        .sort((a, b) => a.price - b.price);
+                name = area.get("description") or area.get("areaDesc") or ""
+                price = area.get("price") or area.get("curPrice") or 0
 
-                    shows.push({
-                        time: session.ShowTime,
-                        sessionId: session.SessionId,
-                        movieTitle: movie.EventTitle,
-                        cheapestSeat: cheapest ? {
-                            name: cheapest.PriceDesc,
-                            price: parseFloat(cheapest.CurPrice || '0'),
-                            available: String(cheapest.AvailStatus) === '1'
-                        } : null,
-                        availableCats,
-                        hasBackSeats: cheapest ? String(cheapest.AvailStatus) === '1' : false,
-                        bookingUrl: `https://in.bookmyshow.com/movies/${city}/seat-layout/${eventCode}/${venueCode}/${session.SessionId}/${date}`
-                    });
-                }
-            }
-        }
+                try:
+                    price = float(price)
+                except Exception:
+                    price = 0
 
-        return { found: true, venueCode, date, shows };
-    } catch(e) {
-        return { found: false, reason: e.message };
-    }
-}
-"""
+                available.append({
+                    "name": name,
+                    "price": price,
+                })
+
+            shows.append({
+                "time": show_time,
+                "availableCats": available,
+                "bookingUrl": f"https://in.bookmyshow.com/seat-layout/{event_code}/{venue_code}",
+            })
+
+        return {"found": True, "shows": shows}
+
+    except Exception as e:
+        return {"found": False, "reason": str(e)}
 
 
 def _check_movie_at_theater(event_code, venue_code, date, page):
@@ -246,25 +228,35 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
         f"https://in.bookmyshow.com/cinemas/{theater['city']}/"
         f"{theater['slug']}/buytickets/{venue_code}/{date}"
     )
+    seat_data = None
     try:
         def handle_response(response):
+            nonlocal seat_data
             try:
-                if "seat" in response.url or "layout" in response.url:
-                    data = response.json()
-                    print("🔥 API:", response.url)
-                    print(data)
+                if (
+                    "fullSeatLayout=true" in response.url
+                    and event_code in response.url
+                    and venue_code in response.url
+                ):
+                    seat_data = response.json()
             except Exception:
                 pass
 
-        if not getattr(page, "_bms_response_hook_added", False):
-            page.on("response", handle_response)
-            page._bms_response_hook_added = True
+        page.on("response", handle_response)
         page.goto(url, timeout=25_000, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(1000)  # let React settle after network activity
-        result = page.evaluate(_CHECK_JS, event_code)
-        return result
+        page.wait_for_timeout(1000)
+        page.remove_listener("response", handle_response)
+
+        if seat_data:
+            return _parse_seat_layout_api(seat_data, event_code, venue_code, date)
+
+        return {"found": False, "reason": "no_api_data"}
     except Exception as e:
+        try:
+            page.remove_listener("response", handle_response)
+        except Exception:
+            pass
         return {"found": False, "reason": str(e)[:80]}
 
 
@@ -374,10 +366,7 @@ def _run_watchlist_monitor(watch_id):
                         if TARGET_CATEGORIES:
                             matching = [
                                 category for category in available
-                                if any(
-                                    target.lower() in (category.get("name") or "").lower()
-                                    for target in TARGET_CATEGORIES
-                                )
+                                if "elite" in (category.get("name") or "").lower()
                             ]
                         _log(watch_id, f"Matching ELITE: {matching}", "debug")
 
