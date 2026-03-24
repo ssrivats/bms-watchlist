@@ -177,9 +177,15 @@ _CHECK_JS = """
     try {
         const api = window.__INITIAL_STATE__?.venueShowtimesFunctionalApi;
         const queries = api?.queries || {};
-        const key = Object.keys(queries)[0];
-        const transformed = queries[key]?.data?.showDetailsTransformed;
+        let transformed = null;
+        for (const q of Object.values(queries)) {
+            if (q?.data?.showDetailsTransformed) {
+                transformed = q.data.showDetailsTransformed;
+                break;
+            }
+        }
         const EventMap = transformed?.Event;
+        if (!transformed) return { found: false, reason: 'no_transformed_data' };
         if (!EventMap) return { found: false, reason: 'no_state' };
 
         const venueCode = window.location.pathname.match(/buytickets\\/([^\\/]+)\\//)?.[1] || '';
@@ -254,7 +260,7 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
             page.on("response", handle_response)
             page._bms_response_hook_added = True
         page.goto(url, timeout=25_000, wait_until="domcontentloaded")
-        page.wait_for_timeout(2500)  # wait for React hydration
+        page.wait_for_timeout(5000)  # wait for React hydration
         result = page.evaluate(_CHECK_JS, event_code)
         return result
     except Exception as e:
@@ -341,6 +347,7 @@ def _run_watchlist_monitor(watch_id):
 
                     shows = result.get("shows", [])
                     date_label = "Today" if date == now.strftime("%Y%m%d") else "Tomorrow"
+                    _log(watch_id, f"Shows found: {len(shows)}", "debug")
 
                     for show in shows:
                         show_dt = _parse_show_time(show["time"], date)
@@ -357,6 +364,7 @@ def _run_watchlist_monitor(watch_id):
                             next_intervals.append(interval)
 
                         available = show.get("availableCats", [])
+                        _log(watch_id, f"Categories: {available}", "debug")
                         if not available:
                             continue
 
@@ -369,11 +377,12 @@ def _run_watchlist_monitor(watch_id):
                                     for target in TARGET_CATEGORIES
                                 )
                             ]
+                        _log(watch_id, f"Matching ELITE: {matching}", "debug")
 
                         if not matching:
                             continue
 
-                        seat = matching[0]
+                        seat = sorted(matching, key=lambda x: x.get("price", 0))[0]
 
                         found_seats.append({
                             "theater": THEATERS[venue_code]["name"],
@@ -393,7 +402,7 @@ def _run_watchlist_monitor(watch_id):
                 _send_watchlist_alert(watch_id, movie_title, phone, found_seats)
                 break
 
-            status_msg = f"Poll #{poll_count}: no back seats yet"
+            status_msg = f"Poll #{poll_count}: no ELITE seats yet"
             item = _load(watch_id)
             item["last_checked"] = now.strftime("%H:%M:%S")
             item["last_result"] = status_msg
