@@ -219,15 +219,14 @@ def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_
 # ── FIXED core check function – full navigation flow ─────────────────────────
 
 def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, movie_slug=None):
-    """Open movie page → Book Tickets → click showtimes → capture seatlayout API."""
+    """Fixed navigation for 2026 BMS – with full debug logging."""
     if not movie_slug:
-        # fallback for old watches (should not happen after fix)
-        movie_slug = ""
+        movie_slug = _slugify(_load(watch_id)["movie"]) if watch_id else ""
 
     url = f"https://in.bookmyshow.com/movies/{movie_slug}/{event_code}"
 
     seat_payloads = []
-    clicked_times = []   # to associate button text with payload
+    clicked_times = []
 
     try:
         def handle_response(response):
@@ -242,19 +241,33 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
 
         page.on("response", handle_response)
 
-        # Step 1 — Movie Page
-        page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(2000)
+        if watch_id:
+            _log(watch_id, f"→ Opening movie page: {url}", "debug")
 
-        # Step 2 — click Book Tickets
-        page.locator("text=Book Tickets").click()
+        # Step 1: Movie page
+        page.goto(url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(3000)
 
-        # Step 3 — click showtime buttons (limit 3)
-        buttons = page.locator("button:has-text('AM'), button:has-text('PM')")
+        # Step 2: Book Tickets / Buy Tickets (2026-proof)
+        book_btn = page.locator("text=Book Tickets, text=Buy Tickets, button:has-text('Tickets')").first
+        if book_btn.count() == 0:
+            if watch_id:
+                _log(watch_id, "❌ Could not find Book/Buy Tickets button", "error")
+            return {"found": False, "reason": "book_button_missing"}
+
+        if watch_id:
+            _log(watch_id, "✅ Clicking Book Tickets", "debug")
+        book_btn.click()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(4000)
+
+        # Step 3: Showtime buttons (updated selector for 2026)
+        buttons = page.locator("button").filter(has_text=re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.I))
         count = buttons.count()
+
+        if watch_id:
+            _log(watch_id, f"Found {count} showtime button(s)", "debug")
 
         for i in range(min(count, 3)):
             try:
@@ -267,48 +280,43 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
 
                 button.click()
                 page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(4000)
+                page.wait_for_timeout(5000)   # give seatlayout time to fire
 
-                # go back for next click
                 page.go_back()
                 page.wait_for_timeout(2000)
-
             except Exception as e:
                 if watch_id:
-                    _log(watch_id, f"Click failed (index {i}): {e}", "warn")
+                    _log(watch_id, f"Click failed index {i}: {e}", "warn")
                 continue
 
         if not seat_payloads:
+            if watch_id:
+                _log(watch_id, "❌ No seatlayout API captured", "error")
             return {"found": False, "reason": "no_api_data"}
 
-        # Parse every captured payload with the corresponding show time
+        # Parse
         merged_shows = []
         for data, show_time in zip(seat_payloads, clicked_times):
-            parsed = _parse_seat_layout_api(
-                data,
-                event_code,
-                venue_code,
-                None,
-                "unknown",
-                show_time,
-                ""
-            )
+            parsed = _parse_seat_layout_api(data, event_code, venue_code, None, "unknown", show_time, "")
             if parsed.get("found"):
                 merged_shows.extend(parsed.get("shows", []))
 
         if merged_shows:
             return {"found": True, "shows": merged_shows}
 
+        if watch_id:
+            _log(watch_id, "No ELITE seats found in any show", "debug")
         return {"found": False, "reason": "no_seats"}
 
     except Exception as e:
+        if watch_id:
+            _log(watch_id, f"Navigation error: {e}", "error")
         return {"found": False, "reason": str(e)[:80]}
     finally:
         try:
             page.remove_listener("response", handle_response)
         except Exception:
             pass
-
 # ── Monitoring thread (polling updated + movie_slug passed) ───────────────────
 
 def _run_watchlist_monitor(watch_id):
