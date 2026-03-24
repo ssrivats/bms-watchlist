@@ -76,11 +76,6 @@ THEATERS = {
     },
 }
 
-# ── Playwright shared browser ─────────────────────────────────────────────────
-
-_browser_lock = threading.Lock()
-_shared_playwright = None
-_shared_browser = None
 
 BMS_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -89,24 +84,6 @@ BMS_UA = (
 )
 
 
-def _get_browser():
-    global _shared_playwright, _shared_browser
-    with _browser_lock:
-        if _shared_browser and _shared_browser.is_connected():
-            return _shared_browser
-        from playwright.sync_api import sync_playwright
-        if _shared_playwright:
-            try:
-                _shared_playwright.stop()
-            except Exception:
-                pass
-        _shared_playwright = sync_playwright().start()
-        _shared_browser = _shared_playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        log.info("Playwright browser launched ✓")
-        return _shared_browser
 
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
@@ -275,7 +252,7 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
 
 def _run_watchlist_monitor(watch_id):
     """Background thread: polls all theaters for this movie until seats open."""
-    from playwright.sync_api import TimeoutError as PwTimeout
+    from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 
     item = _load(watch_id)
     if not item:
@@ -289,24 +266,36 @@ def _run_watchlist_monitor(watch_id):
     _save(watch_id, item)
     _log(watch_id, f"Started watching '{movie_title}' ({event_code})", "start")
 
+    p = None
+    browser = None
+    context = None
+
     try:
-        browser = _get_browser()
+        # ✅ FIX: fresh Playwright instance per monitor
+        p = sync_playwright().start()
+
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+
         context = browser.new_context(
             user_agent=BMS_UA,
             viewport={"width": 1280, "height": 900},
             locale="en-IN",
             timezone_id="Asia/Kolkata",
         )
+
         context.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
         )
+
         page = context.new_page()
         page.route("**/*.{png,jpg,gif,svg,woff,woff2,ttf,ico}", lambda r: r.abort())
 
         poll_count = 0
 
         while True:
-            # Reload item to catch external stop signals
             item = _load(watch_id)
             if not item or item["status"] not in ("monitoring", "starting"):
                 _log(watch_id, "Stopped", "stop")
@@ -331,7 +320,6 @@ def _run_watchlist_monitor(watch_id):
                         continue
 
                     if not result.get("found"):
-                        _log(watch_id, f"{venue_code}/{date}: no data ({result.get('reason','')})", "info")
                         continue
 
                     shows = result.get("shows", [])
@@ -344,7 +332,6 @@ def _run_watchlist_monitor(watch_id):
 
                         mins_away = (show_dt - now).total_seconds() / 60
 
-                        # Skip past shows or shows starting in < 30 mins
                         if mins_away < 30:
                             continue
 
@@ -372,23 +359,16 @@ def _run_watchlist_monitor(watch_id):
                 _send_watchlist_alert(watch_id, movie_title, phone, found_seats)
                 break
 
-            # Log summary
-            status_msg = f"Poll #{poll_count}: checked {len(dates)} date(s) × 3 theaters, no back seats yet"
+            status_msg = f"Poll #{poll_count}: no back seats yet"
             item = _load(watch_id)
             item["last_checked"] = now.strftime("%H:%M:%S")
             item["last_result"] = status_msg
             _save(watch_id, item)
             _log(watch_id, status_msg, "poll")
 
-            # Sleep until next poll
             wait = min(next_intervals) if next_intervals else 1800
-            _log(watch_id, f"Next check in {wait // 60} min {wait % 60} sec", "info")
+            _log(watch_id, f"Next check in {wait // 60} min", "info")
             time.sleep(wait)
-
-        try:
-            context.close()
-        except Exception:
-            pass
 
     except Exception as e:
         item = _load(watch_id)
@@ -397,6 +377,26 @@ def _run_watchlist_monitor(watch_id):
             item["last_error"] = str(e)[:120]
             _save(watch_id, item)
         _log(watch_id, f"Fatal error: {e}", "error")
+
+    finally:
+        # ✅ CLEANUP (CRITICAL)
+        try:
+            if context:
+                context.close()
+        except:
+            pass
+
+        try:
+            if browser:
+                browser.close()
+        except:
+            pass
+
+        try:
+            if p:
+                p.stop()
+        except:
+            pass
 
 
 # ── WhatsApp alert ────────────────────────────────────────────────────────────
