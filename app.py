@@ -219,11 +219,10 @@ def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_
 # ── FIXED core check function – full navigation flow ─────────────────────────
 
 def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, movie_slug=None):
-    """Fixed for Chennai + 2026 BMS city selector."""
+    """Debug version with screenshot when button is missing."""
     if not movie_slug:
         movie_slug = _slugify(_load(watch_id)["movie"]) if watch_id else ""
 
-    # ←←← THIS IS THE FIX
     url = f"https://in.bookmyshow.com/movies/chennai/{movie_slug}/{event_code}"
 
     seat_payloads = []
@@ -245,25 +244,38 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
         if watch_id:
             _log(watch_id, f"→ Opening Chennai movie page: {url}", "debug")
 
-        page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle")
+        page.goto(url, timeout=45000, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(8000)
+
+        page.evaluate("window.scrollBy(0, 400)")
         page.wait_for_timeout(3000)
 
-        # Updated locator for exact text BMS uses in 2026
-        book_btn = page.locator("text=Book tickets, text=Buy tickets, button:has-text('Tickets')").first
+        book_btn = page.locator("button").filter(
+            has_text=re.compile(r"book tickets|buy tickets", re.I)
+        ).first
 
-        if book_btn.count() == 0:
+        try:
+            book_btn.wait_for(state="visible", timeout=15000)
             if watch_id:
-                _log(watch_id, "❌ Could not find Book/Buy Tickets button (even on Chennai page)", "error")
+                _log(watch_id, "✅ Book tickets button found", "debug")
+        except Exception:
+            if watch_id:
+                _log(watch_id, "❌ Button still not visible - saving screenshot", "error")
+                try:
+                    page.screenshot(path=f"debug_{watch_id}_{int(time.time())}.png")
+                    _log(watch_id, f"Screenshot saved: debug_{watch_id}_*.png", "error")
+                except Exception as e:
+                    _log(watch_id, f"Failed to save screenshot: {e}", "error")
             return {"found": False, "reason": "book_button_missing"}
 
         if watch_id:
             _log(watch_id, "✅ Clicking Book tickets", "debug")
-        book_btn.click()
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(4000)
 
-        # Showtime buttons
+        book_btn.click()
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(6000)
+
         buttons = page.locator("button").filter(has_text=re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.I))
         count = buttons.count()
 
@@ -280,11 +292,11 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
                     _log(watch_id, f"Clicking show index {i} → {show_time_text}", "debug")
 
                 button.click()
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(5000)
+                page.wait_for_load_state("networkidle", timeout=10000)
+                page.wait_for_timeout(7000)
 
                 page.go_back()
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(3000)
             except Exception as e:
                 if watch_id:
                     _log(watch_id, f"Click failed index {i}: {e}", "warn")
@@ -305,7 +317,7 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
             return {"found": True, "shows": merged_shows}
 
         if watch_id:
-            _log(watch_id, "No ELITE seats found in any show", "debug")
+            _log(watch_id, "No ELITE seats found", "debug")
         return {"found": False, "reason": "no_seats"}
 
     except Exception as e:
