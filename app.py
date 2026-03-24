@@ -260,7 +260,8 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
             page.on("response", handle_response)
             page._bms_response_hook_added = True
         page.goto(url, timeout=25_000, wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)  # wait for React hydration
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1000)  # let React settle after network activity
         result = page.evaluate(_CHECK_JS, event_code)
         return result
     except Exception as e:
@@ -343,6 +344,7 @@ def _run_watchlist_monitor(watch_id):
                         continue
 
                     if not result.get("found"):
+                        _log(watch_id, f"Check failed: {result.get('reason')}", "error")
                         continue
 
                     shows = result.get("shows", [])
