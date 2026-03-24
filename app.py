@@ -177,9 +177,16 @@ _SESSION_JS = r"""
     const sessions = [];
     const seen = new Set();
 
-    document.querySelectorAll('a[href*="seat-layout"]').forEach((el) => {
-        const href = el.getAttribute('href') || '';
-        const match = href.match(/\/seat-layout\/[^\/]+\/[^\/]+\/([^\/?#]+)\//);
+    document.querySelectorAll('a, button').forEach((el) => {
+        const text = (el.innerText || '').trim();
+        if (!text.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) return;
+
+        let href = el.getAttribute('href') || '';
+        if (!href && el.closest('a')) {
+            href = el.closest('a').getAttribute('href') || '';
+        }
+
+        const match = href.match(/seat-layout\/[^\/]+\/[^\/]+\/([^\/?#]+)/);
         if (!match) return;
 
         const sessionId = match[1];
@@ -188,7 +195,7 @@ _SESSION_JS = r"""
 
         sessions.push({
             sessionId,
-            time: (el.innerText || el.textContent || '').trim(),
+            time: text,
             bookingUrl: href.startsWith('http') ? href : `https://in.bookmyshow.com${href}`,
         });
     });
