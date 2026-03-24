@@ -71,7 +71,7 @@ BMS_UA = (
 
 TARGET_CATEGORIES = ["elite"]
 
-# ── Slugify helper (used for movie page URL) ─────────────────────────────────
+# ── Slugify helper ───────────────────────────────────────────────────────────
 
 def _slugify(name: str) -> str:
     if not name:
@@ -81,7 +81,7 @@ def _slugify(name: str) -> str:
     s = re.sub(r'[\s-]+', '-', s)
     return s.strip('-')
 
-# ── Storage helpers (unchanged) ──────────────────────────────────────────────
+# ── Storage helpers ──────────────────────────────────────────────────────────
 
 def _save(watch_id, data):
     if _redis:
@@ -122,7 +122,7 @@ def _log(watch_id, msg, kind="info"):
     _save(watch_id, item)
     log.info("[%s] %s", watch_id, msg)
 
-# ── Date helpers (unchanged) ─────────────────────────────────────────────────
+# ── Date helpers ─────────────────────────────────────────────────────────────
 
 def _watch_dates():
     now = datetime.now()
@@ -145,19 +145,16 @@ def _parse_show_time(time_str, date_str):
     except Exception:
         return None
 
-# ── UPDATED smart interval per your spec ─────────────────────────────────────
-
 def _smart_interval(minutes_away):
-    """Return poll interval in seconds (even for <30 min)."""
     if minutes_away < 30:
-        return 5          # every 5 seconds
+        return 5
     if minutes_away < 120:
-        return 30         # every 30 seconds
+        return 30
     if minutes_away < 240:
-        return 120        # every 2 minutes
-    return 1800           # every 30 minutes
+        return 120
+    return 1800
 
-# ── Seat layout parser (unchanged) ───────────────────────────────────────────
+# ── Seat layout parser ───────────────────────────────────────────────────────
 
 def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_time, booking_url):
     try:
@@ -216,10 +213,10 @@ def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_
     except Exception as e:
         return {"found": False, "reason": str(e)}
 
-# ── FIXED core check function – full navigation flow ─────────────────────────
+# ── FIXED core check function (updated for <span>Book tickets</span>) ────────
 
 def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, movie_slug=None):
-    """Debug version with screenshot when button is missing."""
+    """2026 BMS fix - targets span containing Book tickets"""
     if not movie_slug:
         movie_slug = _slugify(_load(watch_id)["movie"]) if watch_id else ""
 
@@ -248,34 +245,38 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
         page.wait_for_load_state("networkidle", timeout=15000)
         page.wait_for_timeout(8000)
 
-        page.evaluate("window.scrollBy(0, 400)")
-        page.wait_for_timeout(3000)
+        # Scroll to load dynamic content
+        page.evaluate("window.scrollBy(0, 600)")
+        page.wait_for_timeout(10000)
 
-        book_btn = page.locator("button").filter(
+        # Target the <span>Book tickets</span>
+        book_span = page.locator("span").filter(
             has_text=re.compile(r"book tickets|buy tickets", re.I)
         ).first
 
         try:
-            book_btn.wait_for(state="visible", timeout=15000)
+            book_span.wait_for(state="visible", timeout=15000)
             if watch_id:
-                _log(watch_id, "✅ Book tickets button found", "debug")
+                _log(watch_id, "✅ Found 'Book tickets' span", "debug")
         except Exception:
             if watch_id:
-                _log(watch_id, "❌ Button still not visible - saving screenshot", "error")
+                _log(watch_id, "❌ Still cannot find Book tickets span - saving screenshot", "error")
                 try:
-                    page.screenshot(path=f"debug_{watch_id}_{int(time.time())}.png")
-                    _log(watch_id, f"Screenshot saved: debug_{watch_id}_*.png", "error")
+                    page.screenshot(path=f"debug_span_{watch_id}_{int(time.time())}.png")
+                    _log(watch_id, f"Screenshot saved: debug_span_{watch_id}_*.png", "error")
                 except Exception as e:
                     _log(watch_id, f"Failed to save screenshot: {e}", "error")
             return {"found": False, "reason": "book_button_missing"}
 
         if watch_id:
-            _log(watch_id, "✅ Clicking Book tickets", "debug")
+            _log(watch_id, "✅ Clicking the Book tickets span (parent element)", "debug")
 
-        book_btn.click()
+        # Click the actual clickable parent
+        book_span.locator("..").click()
         page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(6000)
+        page.wait_for_timeout(7000)
 
+        # ── Showtime buttons ─────────────────────────────────────────────────
         buttons = page.locator("button").filter(has_text=re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.I))
         count = buttons.count()
 
@@ -330,7 +331,7 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
         except Exception:
             pass
 
-# ── Monitoring thread (polling updated + movie_slug passed) ───────────────────
+# ── Monitoring thread ────────────────────────────────────────────────────────
 
 def _run_watchlist_monitor(watch_id):
     from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
@@ -419,7 +420,6 @@ def _run_watchlist_monitor(watch_id):
                         if not available:
                             continue
 
-                        # Filter ELITE (existing logic)
                         matching = [
                             cat for cat in available
                             if "elite" in (cat.get("name") or "").lower()
@@ -478,10 +478,9 @@ def _run_watchlist_monitor(watch_id):
             if p: p.stop()
         except: pass
 
-# ── WhatsApp alert & API routes (unchanged except new movieSlug on creation) ─────
+# ── WhatsApp alert ───────────────────────────────────────────────────────────
 
 def _send_watchlist_alert(watch_id, movie_title, phone, found_seats):
-    # ... (exactly the same as original)
     if not phone.startswith("+"):
         phone = f"+91{phone}"
 
@@ -519,13 +518,14 @@ def _send_watchlist_alert(watch_id, movie_title, phone, found_seats):
     _log(watch_id, "All WhatsApp attempts failed", "error")
 
 
+# ── API Routes ───────────────────────────────────────────────────────────────
+
 @app.route("/")
 def home():
     return "BMS Watchlist running (fixed navigation ✓)", 200
 
 @app.route("/health")
 def health():
-    # ... (unchanged)
     status = {
         "status": "ok",
         "service": "bms-watchlist",
@@ -568,7 +568,7 @@ def add_watch():
     item = {
         "id": watch_id,
         "movie": movie,
-        "movieSlug": _slugify(movie),          # ← NEW
+        "movieSlug": _slugify(movie),
         "eventCode": event_code,
         "phone": phone,
         "status": "starting",
@@ -594,9 +594,6 @@ def add_watch():
         "dates": _watch_dates(),
     })
 
-
-# The rest of the routes (get_watchlist, get_watch, stop_watch, test_whatsapp) are unchanged
-# (they already work with the new movieSlug field)
 
 @app.route("/api/watchlist", methods=["GET"])
 def get_watchlist():
@@ -656,7 +653,6 @@ def stop_watch(watch_id):
 
 @app.route("/api/test-whatsapp", methods=["POST"])
 def test_whatsapp():
-    # ... (unchanged)
     data = request.json or {}
     phone = data.get("phone", "").strip()
     if not phone:
