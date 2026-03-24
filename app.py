@@ -172,179 +172,116 @@ def _smart_interval(minutes_away):
 
 # ── Core check: one theater, one date ────────────────────────────────────────
 
-_CHECK_JS = """
-(eventCode) => {
-    try {
-        const api = window.__INITIAL_STATE__?.venueShowtimesFunctionalApi;
-        const queries = api?.queries || {};
-        let transformed = null;
+_SESSION_JS = r"""
+() => {
+    const sessions = [];
+    const seen = new Set();
 
-        for (const q of Object.values(queries)) {
-            if (q?.data?.showDetailsTransformed) {
-                transformed = q.data.showDetailsTransformed;
-                break;
-            }
-        }
+    document.querySelectorAll('a[href*="seat-layout"]').forEach((el) => {
+        const href = el.getAttribute('href') || '';
+        const match = href.match(/\/seat-layout\/[^\/]+\/[^\/]+\/([^\/?#]+)\//);
+        if (!match) return;
 
-        if (!transformed?.Event) {
-            return { found: false, reason: "no_transformed_data" };
-        }
+        const sessionId = match[1];
+        if (!sessionId || seen.has(sessionId)) return;
+        seen.add(sessionId);
 
-        const venueCode = window.location.pathname.match(/buytickets\\/([^\\/]+)\\//)?.[1] || "";
-        const date = window.location.pathname.match(/\\/(\\d{8})(?:$|\\/)/)?.[1] || "";
-        const city = window.location.pathname.match(/\\/cinemas\\/([^\\/]+)\\//)?.[1] || "chennai";
-        const shows = [];
+        sessions.push({
+            sessionId,
+            time: (el.innerText || el.textContent || '').trim(),
+            bookingUrl: href.startsWith('http') ? href : `https://in.bookmyshow.com${href}`,
+        });
+    });
 
-        for (const movie of Object.values(transformed.Event)) {
-            for (const child of Object.values(movie.ChildEvents || {})) {
-                if (child.EventCode !== eventCode) continue;
-
-                for (const session of (child.ShowTimes || [])) {
-                    shows.push({
-                        time: session.ShowTime,
-                        sessionId: session.SessionId,
-                        bookingUrl: `https://in.bookmyshow.com/movies/${city}/seat-layout/${eventCode}/${venueCode}/${session.SessionId}/${date}`
-                    });
-                }
-            }
-        }
-
-        return { found: true, venueCode, date, shows };
-    } catch (e) {
-        return { found: false, reason: e.message };
-    }
+    return sessions;
 }
 """
 
 
-def _parse_seat_layout_api(data, event_code, venue_code, date, session_id=None, show_time=None):
-    """Normalize seat-layout API payloads into the monitor's show format."""
+def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_time, booking_url):
+    """Extract available categories from one seat-layout payload."""
     try:
-        payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
-        sessions = []
+        payload = data.get("data", {}) if isinstance(data, dict) else {}
+        categories = (
+            payload.get("categories")
+            or payload.get("areas")
+            or data.get("categories", [])
+            or data.get("areas", [])
+        )
 
-        if isinstance(payload, dict):
-            sessions = payload.get("sessions") or payload.get("showTimes") or payload.get("showtimes") or []
-
-        if not sessions and isinstance(payload, dict):
-            sessions = [payload]
-
-        shows = []
-
-        for session in sessions:
-            session_show_time = (
-                session.get("showTime")
-                or session.get("ShowTime")
-                or session.get("time")
-                or session.get("Time")
-                or show_time
+        available = []
+        for category in categories:
+            name = (
+                category.get("name")
+                or category.get("description")
+                or category.get("areaDesc")
+                or ""
             )
-            session_code = (
-                session.get("sessionId")
-                or session.get("SessionId")
-                or session.get("sessionCode")
-                or session.get("SessionCode")
-                or session_id
+            seats = (
+                category.get("availableSeats")
+                or category.get("availSeat")
+                or category.get("availabilityCount")
+                or 0
             )
-            areas = session.get("areas") or session.get("categories") or session.get("Areas") or []
+            price = category.get("price") or category.get("curPrice") or 0
 
-            available = []
-            for area in areas:
-                availability = str(
-                    area.get("availability")
-                    or area.get("Availability")
-                    or area.get("availStatus")
-                    or area.get("AvailStatus")
-                    or ""
-                ).upper()
+            try:
+                seats = int(seats)
+            except Exception:
+                seats = 0
 
-                if availability not in ("AVAILABLE", "1", "TRUE", "YES"):
-                    continue
+            try:
+                price = float(price)
+            except Exception:
+                price = 0
 
-                name = (
-                    area.get("description")
-                    or area.get("Description")
-                    or area.get("areaDesc")
-                    or area.get("name")
-                    or area.get("PriceDesc")
-                    or ""
-                )
-                price = (
-                    area.get("price")
-                    or area.get("Price")
-                    or area.get("curPrice")
-                    or area.get("CurPrice")
-                    or 0
-                )
+            if seats <= 0:
+                continue
 
-                try:
-                    price = float(price)
-                except Exception:
-                    price = 0
-
-                available.append({
-                    "name": name,
-                    "price": price,
-                })
-
-            shows.append({
-                "time": session_show_time,
-                "sessionId": session_code,
-                "availableCats": sorted(available, key=lambda cat: cat.get("price", 0)),
-                "bookingUrl": (
-                    f"https://in.bookmyshow.com/movies/chennai/seat-layout/"
-                    f"{event_code}/{venue_code}/{session_code}/{date}"
-                ),
+            available.append({
+                "name": name,
+                "price": price,
+                "availableSeats": seats,
             })
 
-        return {"found": True, "shows": shows}
-
+        return {
+            "found": True,
+            "shows": [{
+                "time": show_time,
+                "sessionId": session_id,
+                "availableCats": sorted(available, key=lambda cat: cat.get("price", 0)),
+                "bookingUrl": booking_url,
+            }],
+        }
     except Exception as e:
         return {"found": False, "reason": str(e)}
 
 
-def _fetch_session_layout(page, event_code, venue_code, date, session_id, booking_url):
-    """Fetch seat-layout data directly for one session."""
-    city = THEATERS[venue_code]["city"]
-    candidate_urls = [
-        (
-            "https://in.bookmyshow.com/api/seats"
-            f"?eventCode={event_code}&venueCode={venue_code}&sessionId={session_id}"
-            f"&date={date}&fullSeatLayout=true"
-        ),
-        f"{booking_url}?fullSeatLayout=true",
-        (
-            f"https://in.bookmyshow.com/movies/{city}/seat-layout/"
-            f"{event_code}/{venue_code}/{session_id}/{date}?fullSeatLayout=true"
-        ),
-    ]
-
-    last_error = "no_api_data"
-
-    for api_url in candidate_urls:
-        try:
-            data = page.evaluate(
-                """async (url) => {
-                    const res = await fetch(url, { credentials: 'include' });
-                    if (!res.ok) {
-                        throw new Error(`http_${res.status}`);
-                    }
-                    return await res.json();
-                }""",
-                api_url,
-            )
-            parsed = _parse_seat_layout_api(data, event_code, venue_code, date, session_id=session_id)
-            if parsed.get("found") and parsed.get("shows"):
-                return parsed
-            last_error = parsed.get("reason", "empty_api_payload")
-        except Exception as e:
-            last_error = str(e)[:120]
-
-    return {"found": False, "reason": last_error}
+def _fetch_session_layout(page, event_code, venue_code, session_id, show_time, booking_url):
+    """Fetch one session's seat-layout payload inside the browser session."""
+    try:
+        data = page.evaluate(
+            """async ({ eventCode, venueCode, sessionId }) => {
+                const url = `https://in.bookmyshow.com/api/seats/layout?eventCode=${eventCode}&venueCode=${venueCode}&sessionId=${sessionId}&fullSeatLayout=true`;
+                const res = await fetch(url, { credentials: 'include' });
+                if (!res.ok) {
+                    throw new Error(`http_${res.status}`);
+                }
+                return await res.json();
+            }""",
+            {
+                "eventCode": event_code,
+                "venueCode": venue_code,
+                "sessionId": session_id,
+            },
+        )
+        return _parse_seat_layout_api(data, event_code, venue_code, None, session_id, show_time, booking_url)
+    except Exception as e:
+        return {"found": False, "reason": str(e)[:120]}
 
 
-def _check_movie_at_theater(event_code, venue_code, date, page):
-    """Load showtimes, then fetch seat-layout API data for each session."""
+def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None):
+    """Load showtimes, extract session ids, then fetch seat categories per session."""
     theater = THEATERS[venue_code]
     url = (
         f"https://in.bookmyshow.com/cinemas/{theater['city']}/"
@@ -355,12 +292,14 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(1000)
 
-        result = page.evaluate(_CHECK_JS, event_code)
-        if not result.get("found"):
-            return result
+        shows = page.evaluate(_SESSION_JS)
+        if watch_id:
+            _log(watch_id, f"Sessions found: {len(shows)}", "debug")
+        if not shows:
+            return {"found": False, "reason": "no_sessions"}
 
         merged_shows = []
-        for show in result.get("shows", []):
+        for show in shows:
             session_id = show.get("sessionId")
             if not session_id:
                 continue
@@ -369,19 +308,14 @@ def _check_movie_at_theater(event_code, venue_code, date, page):
                 page,
                 event_code,
                 venue_code,
-                date,
                 session_id,
+                show.get("time", ""),
                 show.get("bookingUrl", ""),
             )
             if not session_result.get("found"):
                 continue
 
-            session_shows = session_result.get("shows", [])
-            for session_show in session_shows:
-                session_show["time"] = session_show.get("time") or show.get("time")
-                session_show["sessionId"] = session_show.get("sessionId") or session_id
-                session_show["bookingUrl"] = show.get("bookingUrl") or session_show.get("bookingUrl")
-                merged_shows.append(session_show)
+            merged_shows.extend(session_result.get("shows", []))
 
         if merged_shows:
             return {"found": True, "shows": merged_shows}
@@ -458,7 +392,7 @@ def _run_watchlist_monitor(watch_id):
             for date in dates:
                 for venue_code in ["PVSR", "PVES", "PVPZ"]:
                     try:
-                        result = _check_movie_at_theater(event_code, venue_code, date, page)
+                        result = _check_movie_at_theater(event_code, venue_code, date, page, watch_id=watch_id)
                     except PwTimeout:
                         _log(watch_id, f"Timeout on {venue_code}/{date}", "warn")
                         continue
