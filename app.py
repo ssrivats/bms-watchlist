@@ -172,38 +172,6 @@ def _smart_interval(minutes_away):
 
 # ── Core check: one theater, one date ────────────────────────────────────────
 
-_SESSION_JS = r"""
-() => {
-    const sessions = [];
-    const seen = new Set();
-
-    document.querySelectorAll('a, button').forEach((el) => {
-        const text = (el.innerText || '').trim();
-        if (!text.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) return;
-
-        let href = el.getAttribute('href') || '';
-        if (!href && el.closest('a')) {
-            href = el.closest('a').getAttribute('href') || '';
-        }
-
-        const match = href.match(/seat-layout\/[^\/]+\/[^\/]+\/([^\/?#]+)/);
-        if (!match) return;
-
-        const sessionId = match[1];
-        if (!sessionId || seen.has(sessionId)) return;
-        seen.add(sessionId);
-
-        sessions.push({
-            sessionId,
-            time: text,
-            bookingUrl: href.startsWith('http') ? href : `https://in.bookmyshow.com${href}`,
-        });
-    });
-
-    return sessions;
-}
-"""
-
 
 def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_time, booking_url):
     """Extract available categories from one seat-layout payload."""
@@ -264,72 +232,57 @@ def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_
         return {"found": False, "reason": str(e)}
 
 
-def _fetch_session_layout(page, event_code, venue_code, session_id, show_time, booking_url):
-    """Fetch one session's seat-layout payload inside the browser session."""
-    try:
-        data = page.evaluate(
-            """async ({ eventCode, venueCode, sessionId }) => {
-                const url = `https://in.bookmyshow.com/api/seats/layout?eventCode=${eventCode}&venueCode=${venueCode}&sessionId=${sessionId}&fullSeatLayout=true`;
-                const res = await fetch(url, { credentials: 'include' });
-                if (!res.ok) {
-                    throw new Error(`http_${res.status}`);
-                }
-                return await res.json();
-            }""",
-            {
-                "eventCode": event_code,
-                "venueCode": venue_code,
-                "sessionId": session_id,
-            },
-        )
-        return _parse_seat_layout_api(data, event_code, venue_code, None, session_id, show_time, booking_url)
-    except Exception as e:
-        return {"found": False, "reason": str(e)[:120]}
-
-
 def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None):
-    """Load showtimes, extract session ids, then fetch seat categories per session."""
+    """Load theater page and capture seat-layout payloads from BMS network responses."""
     theater = THEATERS[venue_code]
     url = (
         f"https://in.bookmyshow.com/cinemas/{theater['city']}/"
         f"{theater['slug']}/buytickets/{venue_code}/{date}"
     )
+    seat_payloads = []
     try:
+        def handle_response(response):
+            try:
+                if "fullSeatLayout=true" in response.url:
+                    seat_payloads.append(response.json())
+            except Exception:
+                pass
+
+        page.on("response", handle_response)
         page.goto(url, timeout=25_000, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(3000)
 
-        shows = page.evaluate(_SESSION_JS)
-        if watch_id:
-            _log(watch_id, f"Sessions found: {len(shows)}", "debug")
-        if not shows:
-            return {"found": False, "reason": "no_sessions"}
+        if not seat_payloads:
+            return {"found": False, "reason": "no_api_data"}
 
         merged_shows = []
-        for show in shows:
-            session_id = show.get("sessionId")
-            if not session_id:
-                continue
-
-            session_result = _fetch_session_layout(
-                page,
+        for data in seat_payloads:
+            parsed = _parse_seat_layout_api(
+                data,
                 event_code,
                 venue_code,
-                session_id,
-                show.get("time", ""),
-                show.get("bookingUrl", ""),
+                None,
+                "unknown",
+                "",
             )
-            if not session_result.get("found"):
-                continue
+            if parsed.get("found"):
+                merged_shows.extend(parsed.get("shows", []))
 
-            merged_shows.extend(session_result.get("shows", []))
+        if watch_id:
+            _log(watch_id, f"Shows found: {len(merged_shows)}", "debug")
 
         if merged_shows:
             return {"found": True, "shows": merged_shows}
 
-        return {"found": False, "reason": "no_api_data"}
+        return {"found": False, "reason": "no_seats"}
     except Exception as e:
         return {"found": False, "reason": str(e)[:80]}
+    finally:
+        try:
+            page.remove_listener("response", handle_response)
+        except Exception:
+            pass
 
 
 # ── Monitoring thread ─────────────────────────────────────────────────────────
