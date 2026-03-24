@@ -219,11 +219,12 @@ def _parse_seat_layout_api(data, event_code, venue_code, date, session_id, show_
 # ── FIXED core check function – full navigation flow ─────────────────────────
 
 def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, movie_slug=None):
-    """Fixed navigation for 2026 BMS – with full debug logging."""
+    """Fixed for Chennai + 2026 BMS city selector."""
     if not movie_slug:
         movie_slug = _slugify(_load(watch_id)["movie"]) if watch_id else ""
 
-    url = f"https://in.bookmyshow.com/movies/{movie_slug}/{event_code}"
+    # ←←← THIS IS THE FIX
+    url = f"https://in.bookmyshow.com/movies/chennai/{movie_slug}/{event_code}"
 
     seat_payloads = []
     clicked_times = []
@@ -242,27 +243,27 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
         page.on("response", handle_response)
 
         if watch_id:
-            _log(watch_id, f"→ Opening movie page: {url}", "debug")
+            _log(watch_id, f"→ Opening Chennai movie page: {url}", "debug")
 
-        # Step 1: Movie page
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(3000)
 
-        # Step 2: Book Tickets / Buy Tickets (2026-proof)
-        book_btn = page.locator("text=Book Tickets, text=Buy Tickets, button:has-text('Tickets')").first
+        # Updated locator for exact text BMS uses in 2026
+        book_btn = page.locator("text=Book tickets, text=Buy tickets, button:has-text('Tickets')").first
+
         if book_btn.count() == 0:
             if watch_id:
-                _log(watch_id, "❌ Could not find Book/Buy Tickets button", "error")
+                _log(watch_id, "❌ Could not find Book/Buy Tickets button (even on Chennai page)", "error")
             return {"found": False, "reason": "book_button_missing"}
 
         if watch_id:
-            _log(watch_id, "✅ Clicking Book Tickets", "debug")
+            _log(watch_id, "✅ Clicking Book tickets", "debug")
         book_btn.click()
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(4000)
 
-        # Step 3: Showtime buttons (updated selector for 2026)
+        # Showtime buttons
         buttons = page.locator("button").filter(has_text=re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.I))
         count = buttons.count()
 
@@ -280,7 +281,7 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
 
                 button.click()
                 page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(5000)   # give seatlayout time to fire
+                page.wait_for_timeout(5000)
 
                 page.go_back()
                 page.wait_for_timeout(2000)
@@ -294,7 +295,6 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
                 _log(watch_id, "❌ No seatlayout API captured", "error")
             return {"found": False, "reason": "no_api_data"}
 
-        # Parse
         merged_shows = []
         for data, show_time in zip(seat_payloads, clicked_times):
             parsed = _parse_seat_layout_api(data, event_code, venue_code, None, "unknown", show_time, "")
@@ -317,6 +317,7 @@ def _check_movie_at_theater(event_code, venue_code, date, page, watch_id=None, m
             page.remove_listener("response", handle_response)
         except Exception:
             pass
+
 # ── Monitoring thread (polling updated + movie_slug passed) ───────────────────
 
 def _run_watchlist_monitor(watch_id):
